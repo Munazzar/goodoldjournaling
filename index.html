@@ -69,7 +69,8 @@
       </div>
     </header>
 
-    <main class="workspace show-sidebar" id="workspaceGrid">
+    <main class="workspace" id="workspaceGrid">
+      <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
       <!-- Sidebar / index -->
       <aside class="sidebar">
         <div class="sidebar-section">
@@ -134,9 +135,13 @@
           </article>
         </div>
 
-        <!-- Page strip — flip controller (scroll fast to zoom out & flip quickly) -->
-        <div class="pagestrip">
-          <div id="pagestrip" class="pagestrip-inner"></div>
+        <!-- Floating title scrubber — press & hold, then drag to scrub.
+             Drag up flips left, drag down flips right. -->
+        <div class="scrubber" id="scrubber" data-state="collapsed" aria-label="Scrub through pages">
+          <div class="scrubber-viewport" id="scrubberViewport">
+            <ul class="scrubber-list" id="scrubberList"></ul>
+          </div>
+          <div class="scrubber-hint" id="scrubberHint">hold &amp; drag</div>
         </div>
       </section>
     </main>

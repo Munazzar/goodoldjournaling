@@ -39,7 +39,6 @@
     themeToggle:    el("themeToggle"),
     searchInput:    el("searchInput"),
     pagesList:      el("pagesList"),
-    pagestrip:      el("pagestrip"),
     pageStage:      el("pageStage"),
     pageEl:         el("pageEl"),
     pageDate:       el("pageDate"),
@@ -534,26 +533,22 @@
         ${preview ? `<div class="page-row-preview">${escapeHtml(preview)}</div>` : ""}
         ${counts.length ? `<div class="page-row-meta">${counts.join(" · ")}</div>` : ""}
       `;
-      row.addEventListener("click", () => navigateTo(p.id));
+      row.addEventListener("click", () => {
+        navigateTo(p.id);
+        if (window.matchMedia("(max-width: 860px)").matches) {
+          D.workspaceGrid.classList.remove("show-sidebar");
+        }
+      });
       D.pagesList.appendChild(row);
     });
   }
 
   function renderPageStrip() {
-    D.pagestrip.innerHTML = "";
-    const sorted = [...STATE.pages].sort((a, b) => a.date.localeCompare(b.date));
-    sorted.forEach((p) => {
-      const tick = document.createElement("button");
-      tick.className = "pagestrip-tick" + (p.id === STATE.currentId ? " active" : "");
-      tick.dataset.id = p.id;
-      tick.innerHTML = `<span class="tick-date">${p.date}</span><span class="tick-title">${escapeHtml(p.title || "untitled")}</span>`;
-      tick.addEventListener("click", () => navigateTo(p.id));
-      D.pagestrip.appendChild(tick);
-    });
-    requestAnimationFrame(() => {
-      const active = D.pagestrip.querySelector(".active");
-      if (active) active.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
-    });
+    // The bottom strip is replaced by the floating title scrubber (flip.js).
+    if (window.GOJ_FLIP && window.GOJ_FLIP.render) {
+      const ordered = [...STATE.pages].sort((a, b) => b.date.localeCompare(a.date)); // newest first (top)
+      window.GOJ_FLIP.render(ordered, STATE.currentId);
+    }
   }
 
   function renderEditor() {
@@ -653,7 +648,7 @@
   }
 
   // -------------------- NAVIGATION (with Phase 2 flip) --------------------
-  async function navigateTo(id) {
+  async function navigateTo(id, opts = {}) {
     if (id === STATE.currentId) return;
     if (STATE.dirty) await savePage();
 
@@ -661,9 +656,13 @@
     const next = STATE.pages.find((p) => p.id === id);
     if (!next) return;
 
-    const direction = current && next.date > current.date ? "forward" : "back";
+    // direction may be passed in (scrubber knows the gesture direction);
+    // otherwise infer from dates. "left" / "right" preferred; legacy forward/back accepted.
+    let direction = opts.direction;
+    if (!direction) direction = current && next.date > current.date ? "right" : "left";
 
-    if (window.GOJ_FLIP && !STATE.flipping) {
+    const doFlip = opts.flip !== false;
+    if (doFlip && window.GOJ_FLIP && !STATE.flipping) {
       STATE.flipping = true;
       try {
         await window.GOJ_FLIP.flip({ direction, durationMs: window.GOJ_FLIP.currentFlipDuration() });
@@ -796,10 +795,19 @@
       D.titleInput.focus();
     });
 
+    const isMobile = () => window.matchMedia("(max-width: 860px)").matches;
+    function closeSidebar() {
+      D.workspaceGrid.classList.remove("show-sidebar");
+    }
     D.sidebarToggle.addEventListener("click", () => {
-      D.workspaceGrid.classList.toggle("show-sidebar");
-      D.workspaceGrid.classList.toggle("no-sidebar");
+      if (isMobile()) {
+        D.workspaceGrid.classList.toggle("show-sidebar");
+      } else {
+        D.workspaceGrid.classList.toggle("no-sidebar");
+      }
     });
+    const backdrop = document.getElementById("sidebarBackdrop");
+    if (backdrop) backdrop.addEventListener("click", closeSidebar);
 
     D.themeToggle.addEventListener("click", () => {
       const cur = document.body.getAttribute("data-theme") || "light";

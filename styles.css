@@ -206,11 +206,30 @@ body {
   grid-template-columns: 0 minmax(0, 1fr);
 }
 
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 17, 15, 0.4);
+  z-index: 40;
+}
+@media (max-width: 860px) {
+  .workspace.show-sidebar .sidebar-backdrop { display: block; }
+}
+
 @media (max-width: 860px) {
   .workspace { grid-template-columns: minmax(0, 1fr); }
-  .sidebar { display: none; }
-  .workspace.show-sidebar { grid-template-columns: 280px minmax(0, 1fr); }
-  .workspace.show-sidebar .sidebar { display: flex; }
+  .sidebar {
+    display: flex;
+    position: fixed;
+    top: 0; bottom: 0; left: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: 45;
+    transform: translateX(-100%);
+    box-shadow: 0 0 60px -10px rgba(0,0,0,0.45);
+  }
+  .workspace.show-sidebar .sidebar { transform: translateX(0); }
 }
 
 /* ===== SIDEBAR ===== */
@@ -500,47 +519,106 @@ body[data-theme="dark"] .page {
   gap: 12px;
 }
 
-/* ===== PAGE STRIP (foundation for the freewheel flip in Phase 2) ===== */
-.pagestrip {
-  position: sticky;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: linear-gradient(to top, var(--paper-edge) 70%, transparent);
-  padding: 18px 0 18px;
-  z-index: 10;
-  pointer-events: none;
+/* ===== FLOATING TITLE SCRUBBER ===== */
+.scrubber {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  z-index: 14;
+  width: min(360px, calc(100vw - 32px));
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 16px;
+  box-shadow: 0 16px 44px -22px rgba(0,0,0,0.45);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  transition: box-shadow 0.25s var(--ease);
 }
-.pagestrip-inner {
-  display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  scroll-snap-type: x mandatory;
-  padding: 0 max(24px, calc(50vw - 320px));
-  pointer-events: auto;
-  scrollbar-width: none;
-}
-.pagestrip-inner::-webkit-scrollbar { display: none; }
+.scrubber:active { cursor: grabbing; }
 
-.pagestrip-tick {
-  flex: 0 0 auto;
-  scroll-snap-align: center;
-  padding: 8px 14px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  color: var(--ink-faint);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  border-radius: var(--rad-sm);
-  white-space: nowrap;
-  transition: color 0.2s var(--ease), background 0.2s var(--ease);
+.scrubber-viewport {
+  position: relative;
+  height: 46px;                 /* collapsed: one row */
+  overflow: hidden;
+  transition: height 0.28s var(--ease);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24%, #000 76%, transparent);
+          mask-image: linear-gradient(to bottom, transparent, #000 24%, #000 76%, transparent);
 }
-.pagestrip-tick:hover { color: var(--ink); }
-.pagestrip-tick.active {
-  color: var(--vermillion);
-  font-weight: 600;
+.scrubber[data-state="collapsed"] .scrubber-viewport {
+  -webkit-mask-image: none;
+          mask-image: none;
+}
+.scrubber[data-state="active"] .scrubber-viewport {
+  height: 220px;                /* expanded: ~5 rows */
+}
+.scrubber[data-state="active"] { box-shadow: 0 24px 60px -20px rgba(0,0,0,0.55); }
+
+.scrubber-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  will-change: transform;
+}
+.scrubber-row {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 18px;
+  opacity: 0.32;
+  transition: opacity 0.18s var(--ease);
+  cursor: pointer;
+}
+.scrubber-row.active { opacity: 1; }
+.scrubber[data-state="collapsed"] .scrubber-row { opacity: 0; }
+.scrubber[data-state="collapsed"] .scrubber-row.active { opacity: 1; }
+
+.row-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-variation-settings: "opsz" 80, "SOFT" 60;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+.row-date {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  flex: 0 0 auto;
+}
+.scrubber-row.active .row-date { color: var(--vermillion); }
+
+.scrubber-hint {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 4px 0 7px;
+  border-top: 1px solid var(--rule);
+  opacity: 0.7;
+}
+.scrubber[data-state="active"] .scrubber-hint { opacity: 0; }
+
+/* The cheap blank sheet used during rapid scrubbing */
+.flip-sheet {
+  position: absolute;
+  background: var(--paper);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 5;
+  backface-visibility: hidden;
+  box-shadow: 0 0 30px -10px rgba(0,0,0,0.3);
+  will-change: transform;
 }
 
 /* ===== TOAST ===== */
@@ -759,18 +837,6 @@ body[data-theme="dark"] .page {
   color: var(--vermillion);
   margin-top: 4px;
   letter-spacing: 0.04em;
-}
-
-/* ---- Two-line page strip ticks ---- */
-.pagestrip-tick { display: flex; flex-direction: column; align-items: center; gap: 1px; line-height: 1.2; }
-.tick-date { font-size: 11px; }
-.tick-title {
-  font-size: 9px;
-  max-width: 90px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.6;
 }
 
 /* ============================================================
@@ -1032,3 +1098,42 @@ body[data-theme="dark"] .page {
 ::view-transition-new(root) {
   animation-duration: 0.35s;
 }
+
+/* ============================================================
+   Mobile refinements (scrubber, topbar, spacing)
+   ============================================================ */
+
+/* Leave room at the bottom for the floating scrubber */
+.main { padding-bottom: 110px; }
+
+/* Toast sits above the scrubber */
+.toast { bottom: 104px; }
+
+/* Hide the floating draw/photo tools while actively scrubbing */
+body:has(.scrubber[data-state="active"]) .page-tools {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s var(--ease);
+}
+
+@media (max-width: 860px) {
+  .page-tools { right: 14px; bottom: 104px; }
+  .scrubber { bottom: 16px; }
+}
+
+/* Narrow phones: declutter the header */
+@media (max-width: 600px) {
+  .topbar { padding: 12px 14px; }
+  .brand-name { display: none; }
+  .topbar-actions { gap: 8px; }
+  .status { display: none; }
+  .btn { padding: 7px 11px; font-size: 10px; }
+  .page { padding: 30px 22px; }
+  .page::before { left: 8px; height: 40px; }
+  .page-title-input { font-size: 26px; }
+  .scrubber { width: calc(100vw - 24px); }
+}
+
+/* Make the page stage never cause horizontal scroll when zoomed */
+.page-stage { max-width: 100%; }
+body { overflow-x: hidden; }
