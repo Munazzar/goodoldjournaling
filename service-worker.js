@@ -1,12 +1,17 @@
 // Good Old Journaling — service worker
 // Caches the app shell. Never caches Google API or auth requests.
 
-const CACHE = "goj-shell-v1";
+const CACHE = "goj-shell-v2";
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
+  "./idb.js",
+  "./search.js",
+  "./flip.js",
+  "./draw.js",
+  "./photo.js",
   "./config.js",
   "./manifest.json",
   "./logo.svg",

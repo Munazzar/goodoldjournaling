@@ -1,6 +1,7 @@
 /* ============================================================
-   Good Old Journaling — app.js
-   Phase 1 foundation: auth · Drive · pages · editor · search
+   Good Old Journaling — app.js (core)
+   Auth · Drive · Pages model · Editor wiring
+   Other features live in: flip.js, draw.js, photo.js, search.js, idb.js
    ============================================================ */
 
 (() => {
@@ -8,10 +9,16 @@
 
   const CFG = window.GOJ_CONFIG;
   if (!CFG || CFG.API_KEY.startsWith("PASTE_") || CFG.CLIENT_ID.startsWith("PASTE_")) {
-    showWelcomeError(
-      "Add your keys to config.js",
-      "Open config.js in your editor and paste in your Google API key and OAuth client ID. Then refresh."
-    );
+    document.addEventListener("DOMContentLoaded", () => {
+      const w = document.getElementById("welcome");
+      const m = document.getElementById("welcomeMsg");
+      const s = document.getElementById("welcomeSub");
+      const b = document.getElementById("welcomeBtn");
+      if (m) m.textContent = "Add your keys to config.js";
+      if (s) s.textContent = "Open config.js, paste your Google API key and OAuth client ID. Then refresh.";
+      if (b) b.hidden = true;
+      if (w) w.hidden = false;
+    });
     return;
   }
 
@@ -23,6 +30,7 @@
     welcomeSub:     el("welcomeSub"),
     welcomeBtn:     el("welcomeBtn"),
     workspace:      el("workspace"),
+    workspaceGrid:  el("workspaceGrid"),
     status:         el("status"),
     statusText:     el("statusText"),
     signoutBtn:     el("signoutBtn"),
@@ -32,15 +40,22 @@
     searchInput:    el("searchInput"),
     pagesList:      el("pagesList"),
     pagestrip:      el("pagestrip"),
+    pageStage:      el("pageStage"),
+    pageEl:         el("pageEl"),
     pageDate:       el("pageDate"),
     pageDateLabel:  el("pageDateLabel"),
     titleInput:     el("titleInput"),
     tagsRow:        el("tagsRow"),
     tagInput:       el("tagInput"),
     editor:         el("editor"),
+    drawingsArea:   el("drawingsArea"),
+    photosArea:     el("photosArea"),
     pageFootSaved:  el("pageFootSaved"),
     pageFootCount:  el("pageFootCount"),
     toast:          el("toast"),
+    drawBtn:        el("drawBtn"),
+    photoBtn:       el("photoBtn"),
+    photoInput:     el("photoInput"),
   };
 
   // -------------------- STATE --------------------
@@ -49,26 +64,17 @@
     gisReady:   false,
     tokenClient:null,
     folderId:   null,
-    pages:      [],          // [{id, fileId, date, title, tags[], content, createdAt, updatedAt}]
+    pages:      [],
     currentId:  null,
     filter:     "",
     saveTimer:  null,
     refreshTimer: null,
     saving:     false,
     dirty:      false,
+    flipping:   false,
   };
 
-  // -------------------- AUTH (the part that was broken) --------------------
-  // Why login kept repeating:
-  //  1. Tokens expire after 1 hour and there's no refresh token in browser OAuth.
-  //  2. The old code only attempted silent re-auth once at page load.
-  //  3. There was no refresh-before-expiry scheduling.
-  // Fixes here:
-  //  - schedule silent refresh ~5 min before expiry
-  //  - silent refresh again on tab focus if token is close to expiring
-  //  - on Drive 401, attempt one silent refresh and retry the call
-  //  - drive.file scope (instead of full drive) gives Google fewer reasons to re-prompt
-
+  // -------------------- AUTH --------------------
   const TOKEN_KEY = "goj.token.v1";
   const REFRESH_LEAD_MS = 5 * 60 * 1000;
 
@@ -76,18 +82,9 @@
     try { return JSON.parse(localStorage.getItem(TOKEN_KEY) || "null"); }
     catch { return null; }
   }
-
-  function storeToken(t) {
-    localStorage.setItem(TOKEN_KEY, JSON.stringify(t));
-  }
-
-  function clearStoredToken() {
-    localStorage.removeItem(TOKEN_KEY);
-  }
-
-  function tokenValid(t) {
-    return t && t.access_token && t.expires_at && t.expires_at > Date.now() + 30_000;
-  }
+  function storeToken(t) { localStorage.setItem(TOKEN_KEY, JSON.stringify(t)); }
+  function clearStoredToken() { localStorage.removeItem(TOKEN_KEY); }
+  function tokenValid(t) { return t && t.access_token && t.expires_at && t.expires_at > Date.now() + 30_000; }
 
   function scheduleRefresh(t) {
     if (STATE.refreshTimer) clearTimeout(STATE.refreshTimer);
@@ -103,7 +100,6 @@
   function tokenFromResponse(resp) {
     return {
       access_token: resp.access_token,
-      // expires_in is seconds; subtract a small buffer
       expires_at:   Date.now() + (resp.expires_in * 1000) - 30_000,
       scope:        resp.scope,
       token_type:   resp.token_type,
@@ -150,13 +146,8 @@
       setStatus("Connected", "online");
       return true;
     }
-    // Try silent refresh — works if the user's Google session is still alive.
-    try {
-      await silentRefresh();
-      return true;
-    } catch {
-      return false;
-    }
+    try { await silentRefresh(); return true; }
+    catch { return false; }
   }
 
   function signOut() {
@@ -173,13 +164,11 @@
     showWelcome();
   }
 
-  // Refresh on tab focus if we're getting close to expiry
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
     const t = loadStoredToken();
     if (!t) return;
-    const msLeft = t.expires_at - Date.now();
-    if (msLeft < REFRESH_LEAD_MS) {
+    if (t.expires_at - Date.now() < REFRESH_LEAD_MS) {
       silentRefresh().catch(() => {});
     }
   });
@@ -205,7 +194,7 @@
     STATE.tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: CFG.CLIENT_ID,
       scope: CFG.SCOPES,
-      callback: () => {}, // set per request
+      callback: () => {},
     });
     STATE.gisReady = true;
     bootIfReady();
@@ -213,6 +202,16 @@
 
   async function bootIfReady() {
     if (!STATE.gapiReady || !STATE.gisReady) return;
+
+    // Phase 6: try loading from IndexedDB first so we can render instantly
+    if (window.GOJ_IDB) {
+      try {
+        const cached = await window.GOJ_IDB.loadAllPages();
+        if (cached && cached.length) {
+          STATE.pages = cached.map(normalizePage);
+        }
+      } catch (e) { console.warn("IDB load failed", e); }
+    }
 
     const resumed = await tryResumeSession();
     if (resumed) {
@@ -223,22 +222,13 @@
   }
 
   // -------------------- DRIVE --------------------
-  // With drive.file scope, our app only sees files it created.
-  // Strategy: one folder + one file per page + appProperties for indexable metadata.
-
   async function driveCall(fn) {
-    // Wraps a Drive API call with automatic refresh-on-401 retry.
-    try {
-      return await fn();
-    } catch (err) {
+    try { return await fn(); }
+    catch (err) {
       const status = err?.status || err?.result?.error?.code;
       if (status === 401) {
-        try {
-          await silentRefresh();
-          return await fn();
-        } catch (e2) {
-          throw e2;
-        }
+        try { await silentRefresh(); return await fn(); }
+        catch (e2) { throw e2; }
       }
       throw err;
     }
@@ -249,31 +239,19 @@
     const cached = localStorage.getItem("goj.folderId");
     if (cached) {
       try {
-        const r = await driveCall(() => gapi.client.drive.files.get({
-          fileId: cached,
-          fields: "id,trashed",
-        }));
-        if (!r.result.trashed) {
-          STATE.folderId = cached;
-          return cached;
-        }
+        const r = await driveCall(() => gapi.client.drive.files.get({ fileId: cached, fields: "id,trashed" }));
+        if (!r.result.trashed) { STATE.folderId = cached; return cached; }
       } catch {}
     }
-    // Search by name within the user's drive scope visible to this app
     const list = await driveCall(() => gapi.client.drive.files.list({
       q: `name='${CFG.DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-      fields: "files(id,name)",
-      pageSize: 1,
-      spaces: "drive",
+      fields: "files(id,name)", pageSize: 1, spaces: "drive",
     }));
     if (list.result.files && list.result.files.length) {
       STATE.folderId = list.result.files[0].id;
     } else {
       const create = await driveCall(() => gapi.client.drive.files.create({
-        resource: {
-          name: CFG.DRIVE_FOLDER_NAME,
-          mimeType: "application/vnd.google-apps.folder",
-        },
+        resource: { name: CFG.DRIVE_FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" },
         fields: "id",
       }));
       STATE.folderId = create.result.id;
@@ -290,9 +268,7 @@
       const r = await driveCall(() => gapi.client.drive.files.list({
         q: `'${STATE.folderId}' in parents and mimeType='application/json' and trashed=false`,
         fields: "nextPageToken, files(id,name,modifiedTime,appProperties)",
-        pageSize: 100,
-        pageToken,
-        orderBy: "modifiedTime desc",
+        pageSize: 100, pageToken, orderBy: "modifiedTime desc",
       }));
       (r.result.files || []).forEach((f) => all.push(f));
       pageToken = r.result.nextPageToken;
@@ -302,9 +278,7 @@
 
   async function downloadPageJson(fileId) {
     const r = await driveCall(() => gapi.client.request({
-      path: `/drive/v3/files/${fileId}`,
-      method: "GET",
-      params: { alt: "media" },
+      path: `/drive/v3/files/${fileId}`, method: "GET", params: { alt: "media" },
     }));
     try { return JSON.parse(r.body); } catch { return null; }
   }
@@ -314,44 +288,76 @@
     const isNew = !page.fileId;
     const name = pageFileName(page);
     const metadata = {
-      name,
-      mimeType: "application/json",
+      name, mimeType: "application/json",
       appProperties: {
         date: page.date,
         tags: (page.tags || []).join(","),
         title: (page.title || "").slice(0, 100),
+        schemaVersion: String(page.schemaVersion || 2),
       },
     };
     if (isNew) metadata.parents = [STATE.folderId];
 
-    // Multipart upload (metadata + content in one request)
     const boundary = "-------goj" + Math.random().toString(36).slice(2);
     const delim = `\r\n--${boundary}\r\n`;
     const close = `\r\n--${boundary}--`;
     const body =
-      delim +
-      "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
-      JSON.stringify(metadata) +
-      delim +
-      "Content-Type: application/json\r\n\r\n" +
-      JSON.stringify(page) +
-      close;
+      delim + "Content-Type: application/json; charset=UTF-8\r\n\r\n" + JSON.stringify(metadata) +
+      delim + "Content-Type: application/json\r\n\r\n" + JSON.stringify(page) + close;
 
     const path = isNew
       ? "/upload/drive/v3/files?uploadType=multipart&fields=id"
       : `/upload/drive/v3/files/${page.fileId}?uploadType=multipart&fields=id`;
 
     const r = await driveCall(() => gapi.client.request({
-      path,
-      method: isNew ? "POST" : "PATCH",
+      path, method: isNew ? "POST" : "PATCH",
       headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
       body,
     }));
     return r.result.id;
   }
 
+  // Upload a binary Blob (photo) using fetch — gapi.client.request doesn't handle binary well
+  async function uploadBlob(blob, name, parentId) {
+    await ensureFolder();
+    const metadata = { name, mimeType: blob.type, parents: [parentId || STATE.folderId] };
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+    form.append("file", blob);
+    const doFetch = (token) => fetch(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+      { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form }
+    );
+    let token = gapi.client.getToken().access_token;
+    let resp = await doFetch(token);
+    if (resp.status === 401) {
+      await silentRefresh();
+      token = gapi.client.getToken().access_token;
+      resp = await doFetch(token);
+    }
+    if (!resp.ok) throw new Error("Upload failed: " + resp.status);
+    return (await resp.json()).id;
+  }
+
+  async function downloadBlobUrl(fileId) {
+    const doFetch = (token) => fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    let token = gapi.client.getToken().access_token;
+    let resp = await doFetch(token);
+    if (resp.status === 401) {
+      await silentRefresh();
+      token = gapi.client.getToken().access_token;
+      resp = await doFetch(token);
+    }
+    if (!resp.ok) throw new Error("Download failed: " + resp.status);
+    const blob = await resp.blob();
+    return URL.createObjectURL(blob);
+  }
+
   async function deletePageFile(fileId) {
-    await driveCall(() => gapi.client.drive.files.delete({ fileId }));
+    if (!fileId) return;
+    await driveCall(() => gapi.client.drive.files.delete({ fileId })).catch(() => {});
   }
 
   function pageFileName(p) {
@@ -368,9 +374,28 @@
       date: date || toISODate(new Date()),
       title: "",
       tags: [],
-      content: "",        // HTML for now; future: blocks[]
+      content: "",
+      drawings: [],
+      photos: [],
+      schemaVersion: 2,
       createdAt: now,
       updatedAt: now,
+    };
+  }
+
+  function normalizePage(p) {
+    return {
+      id: p.id,
+      fileId: p.fileId || null,
+      date: p.date || toISODate(new Date()),
+      title: p.title || "",
+      tags: Array.isArray(p.tags) ? p.tags : [],
+      content: p.content || "",
+      drawings: Array.isArray(p.drawings) ? p.drawings : [],
+      photos: Array.isArray(p.photos) ? p.photos : [],
+      schemaVersion: p.schemaVersion || 2,
+      createdAt: p.createdAt || new Date().toISOString(),
+      updatedAt: p.updatedAt || new Date().toISOString(),
     };
   }
 
@@ -390,16 +415,11 @@
     const [y, m, d] = iso.split("-").map(Number);
     const dt = new Date(y, m - 1, d);
     return dt.toLocaleDateString(undefined, {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
+      weekday: "long", month: "long", day: "numeric", year: "numeric",
     });
   }
 
-  function isToday(iso) {
-    return iso === toISODate(new Date());
-  }
+  function isToday(iso) { return iso === toISODate(new Date()); }
 
   function plainText(html) {
     const div = document.createElement("div");
@@ -407,32 +427,45 @@
     return (div.innerText || "").replace(/\s+/g, " ").trim();
   }
 
+  function searchableTextFor(p) {
+    const ocr = (p.photos || []).map((ph) => ph.ocrText || "").join(" ");
+    return [p.title, plainText(p.content), (p.tags || []).join(" "), p.date, ocr].join(" ");
+  }
+
   // -------------------- BOOT / LOAD --------------------
   async function enterApp() {
     D.welcome.hidden = true;
     D.workspace.hidden = false;
-    setStatus("Loading…");
+    setStatus("Syncing…");
     try {
       const files = await listPages();
       const loaded = await Promise.all(files.map(async (f) => {
         const data = await downloadPageJson(f.id);
         if (!data) return null;
-        return { ...data, fileId: f.id };
+        return normalizePage({ ...data, fileId: f.id });
       }));
-      STATE.pages = loaded.filter(Boolean);
-      // Default to today's page if exists, else newest, else new
+      const remotePages = loaded.filter(Boolean);
+
+      const merged = mergePageSets(STATE.pages, remotePages);
+      STATE.pages = merged;
+
+      if (window.GOJ_IDB) {
+        window.GOJ_IDB.saveAllPages(STATE.pages).catch(() => {});
+      }
+
       const today = toISODate(new Date());
       const todaysPage = STATE.pages.find((p) => p.date === today);
-      if (todaysPage) {
-        STATE.currentId = todaysPage.id;
-      } else if (STATE.pages.length) {
-        STATE.currentId = STATE.pages[0].id;
+      if (todaysPage) STATE.currentId = todaysPage.id;
+      else if (STATE.pages.length) {
+        const sorted = [...STATE.pages].sort((a, b) => b.date.localeCompare(a.date));
+        STATE.currentId = sorted[0].id;
       } else {
         const fresh = newPage();
         STATE.pages.push(fresh);
         STATE.currentId = fresh.id;
       }
       renderAll();
+      if (window.GOJ_SEARCH) window.GOJ_SEARCH.rebuild(STATE.pages);
       setStatus("Connected", "online");
     } catch (e) {
       console.error(e);
@@ -440,10 +473,21 @@
     }
   }
 
-  // -------------------- RENDER --------------------
-  function getCurrent() {
-    return STATE.pages.find((p) => p.id === STATE.currentId) || null;
+  function mergePageSets(cached, remote) {
+    const byId = new Map();
+    [...cached, ...remote].forEach((p) => {
+      const existing = byId.get(p.id);
+      if (!existing) { byId.set(p.id, p); return; }
+      const useRemote = p.updatedAt > existing.updatedAt;
+      const merged = useRemote ? p : existing;
+      if (!merged.fileId && (p.fileId || existing.fileId)) merged.fileId = p.fileId || existing.fileId;
+      byId.set(p.id, merged);
+    });
+    return [...byId.values()];
   }
+
+  // -------------------- RENDER --------------------
+  function getCurrent() { return STATE.pages.find((p) => p.id === STATE.currentId) || null; }
 
   function renderAll() {
     renderPagesList();
@@ -453,22 +497,23 @@
 
   function renderPagesList() {
     D.pagesList.innerHTML = "";
-    const q = STATE.filter.trim().toLowerCase();
+    const q = STATE.filter.trim();
+    let listToShow;
+    if (q) {
+      if (window.GOJ_SEARCH && window.GOJ_SEARCH.ready) {
+        const hits = window.GOJ_SEARCH.search(q);
+        const ids = new Set(hits.map((h) => h.id));
+        listToShow = STATE.pages.filter((p) => ids.has(p.id));
+      } else {
+        const ql = q.toLowerCase();
+        listToShow = STATE.pages.filter((p) => searchableTextFor(p).toLowerCase().includes(ql));
+      }
+    } else {
+      listToShow = [...STATE.pages];
+    }
+    listToShow.sort((a, b) => b.date.localeCompare(a.date));
 
-    const sorted = [...STATE.pages].sort((a, b) => b.date.localeCompare(a.date));
-    const filtered = q
-      ? sorted.filter((p) => {
-          const hay = (
-            (p.title || "") + " " +
-            plainText(p.content) + " " +
-            (p.tags || []).join(" ") + " " +
-            p.date
-          ).toLowerCase();
-          return hay.includes(q);
-        })
-      : sorted;
-
-    if (!filtered.length) {
+    if (!listToShow.length) {
       const empty = document.createElement("div");
       empty.className = "empty-hint";
       empty.textContent = q ? "Nothing matches that." : "Your pages will live here.";
@@ -476,16 +521,20 @@
       return;
     }
 
-    filtered.forEach((p) => {
+    listToShow.forEach((p) => {
       const row = document.createElement("button");
       row.className = "page-row" + (p.id === STATE.currentId ? " active" : "");
       const preview = plainText(p.content).slice(0, 90);
+      const counts = [];
+      if (p.drawings && p.drawings.length) counts.push(`${p.drawings.length} drawing${p.drawings.length === 1 ? "" : "s"}`);
+      if (p.photos && p.photos.length) counts.push(`${p.photos.length} photo${p.photos.length === 1 ? "" : "s"}`);
       row.innerHTML = `
         <div class="page-row-date">${escapeHtml(p.date)}${isToday(p.date) ? " · today" : ""}</div>
         <div class="page-row-title">${escapeHtml(p.title || "Untitled")}</div>
         ${preview ? `<div class="page-row-preview">${escapeHtml(preview)}</div>` : ""}
+        ${counts.length ? `<div class="page-row-meta">${counts.join(" · ")}</div>` : ""}
       `;
-      row.addEventListener("click", () => switchTo(p.id));
+      row.addEventListener("click", () => navigateTo(p.id));
       D.pagesList.appendChild(row);
     });
   }
@@ -496,14 +545,14 @@
     sorted.forEach((p) => {
       const tick = document.createElement("button");
       tick.className = "pagestrip-tick" + (p.id === STATE.currentId ? " active" : "");
-      tick.textContent = p.date;
-      tick.addEventListener("click", () => switchTo(p.id));
+      tick.dataset.id = p.id;
+      tick.innerHTML = `<span class="tick-date">${p.date}</span><span class="tick-title">${escapeHtml(p.title || "untitled")}</span>`;
+      tick.addEventListener("click", () => navigateTo(p.id));
       D.pagestrip.appendChild(tick);
     });
-    // Scroll the active one into view
     requestAnimationFrame(() => {
       const active = D.pagestrip.querySelector(".active");
-      if (active) active.scrollIntoView({ inline: "center", block: "nearest" });
+      if (active) active.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
     });
   }
 
@@ -516,13 +565,13 @@
     D.titleInput.value = p.title || "";
     D.editor.innerHTML = p.content || "";
     renderTags();
+    renderDrawings();
+    renderPhotos();
     updateFootMeta();
   }
 
   function renderTags() {
-    const p = getCurrent();
-    if (!p) return;
-    // Remove existing tag chips (keep the input)
+    const p = getCurrent(); if (!p) return;
     [...D.tagsRow.querySelectorAll(".tag")].forEach((n) => n.remove());
     (p.tags || []).forEach((t) => {
       const chip = document.createElement("span");
@@ -537,9 +586,64 @@
     });
   }
 
+  function renderDrawings() {
+    const p = getCurrent(); if (!p) return;
+    D.drawingsArea.innerHTML = "";
+    (p.drawings || []).forEach((dr, idx) => {
+      const card = document.createElement("figure");
+      card.className = "drawing-card";
+      card.innerHTML = `
+        <div class="drawing-svg-wrap"></div>
+        <figcaption class="block-actions">
+          <button class="textbtn delete-drawing" data-idx="${idx}">remove</button>
+        </figcaption>
+      `;
+      const svg = window.GOJ_DRAW ? window.GOJ_DRAW.renderSvg(dr) : null;
+      if (svg) card.querySelector(".drawing-svg-wrap").appendChild(svg);
+      card.querySelector(".delete-drawing").addEventListener("click", () => {
+        if (!confirm("Remove this drawing?")) return;
+        p.drawings.splice(idx, 1);
+        markDirty();
+        renderDrawings();
+      });
+      D.drawingsArea.appendChild(card);
+    });
+  }
+
+  function renderPhotos() {
+    const p = getCurrent(); if (!p) return;
+    D.photosArea.innerHTML = "";
+    (p.photos || []).forEach((ph, idx) => {
+      const card = document.createElement("figure");
+      card.className = "photo-card";
+      const imgSrc = ph.thumbnail || "";
+      card.innerHTML = `
+        <div class="photo-thumb">
+          ${imgSrc ? `<img alt="" src="${imgSrc}" />` : `<div class="photo-placeholder">image</div>`}
+          <button class="photo-view textbtn" data-idx="${idx}">view full</button>
+        </div>
+        ${ph.ocrText ? `<figcaption class="photo-ocr">${escapeHtml(ph.ocrText.slice(0, 240))}${ph.ocrText.length > 240 ? "…" : ""}</figcaption>` : ""}
+        <div class="block-actions">
+          <button class="textbtn delete-photo" data-idx="${idx}">remove</button>
+        </div>
+      `;
+      card.querySelector(".photo-view").addEventListener("click", async () => {
+        if (window.GOJ_PHOTO) await window.GOJ_PHOTO.openLightbox(ph);
+      });
+      card.querySelector(".delete-photo").addEventListener("click", async () => {
+        if (!confirm("Remove this photo?")) return;
+        if (ph.originalFileId) await deletePageFile(ph.originalFileId);
+        if (ph.cleanedFileId) await deletePageFile(ph.cleanedFileId);
+        p.photos.splice(idx, 1);
+        markDirty();
+        renderPhotos();
+      });
+      D.photosArea.appendChild(card);
+    });
+  }
+
   function updateFootMeta() {
-    const p = getCurrent();
-    if (!p) return;
+    const p = getCurrent(); if (!p) return;
     const words = plainText(p.content).split(/\s+/).filter(Boolean).length;
     D.pageFootCount.textContent = `${words} word${words === 1 ? "" : "s"}`;
     const updated = new Date(p.updatedAt);
@@ -548,15 +652,48 @@
       : `saved ${updated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   }
 
-  function switchTo(id) {
-    if (STATE.dirty) saveSoon(true); // flush
+  // -------------------- NAVIGATION (with Phase 2 flip) --------------------
+  async function navigateTo(id) {
+    if (id === STATE.currentId) return;
+    if (STATE.dirty) await savePage();
+
+    const current = getCurrent();
+    const next = STATE.pages.find((p) => p.id === id);
+    if (!next) return;
+
+    const direction = current && next.date > current.date ? "forward" : "back";
+
+    if (window.GOJ_FLIP && !STATE.flipping) {
+      STATE.flipping = true;
+      try {
+        await window.GOJ_FLIP.flip({ direction, durationMs: window.GOJ_FLIP.currentFlipDuration() });
+      } catch (e) { console.warn(e); }
+      STATE.flipping = false;
+    }
+
     STATE.currentId = id;
-    renderAll();
+
+    if (document.startViewTransition) {
+      document.startViewTransition(() => renderAll());
+    } else {
+      renderAll();
+    }
   }
 
-  // -------------------- EDITING --------------------
+  document.addEventListener("keydown", (e) => {
+    if (e.target.matches("input, textarea, [contenteditable]")) return;
+    const sorted = [...STATE.pages].sort((a, b) => a.date.localeCompare(b.date));
+    const idx = sorted.findIndex((p) => p.id === STATE.currentId);
+    if (idx < 0) return;
+    if (e.key === "ArrowLeft" && idx > 0) navigateTo(sorted[idx - 1].id);
+    if (e.key === "ArrowRight" && idx < sorted.length - 1) navigateTo(sorted[idx + 1].id);
+  });
+
+  // -------------------- EDITING / SAVE --------------------
   function markDirty() {
     STATE.dirty = true;
+    const p = getCurrent();
+    if (p && window.GOJ_IDB) window.GOJ_IDB.savePage(p).catch(() => {});
     saveSoon();
   }
 
@@ -579,6 +716,8 @@
       STATE.saving = false;
       updateFootMeta();
       renderPagesList();
+      if (window.GOJ_IDB) window.GOJ_IDB.savePage(p).catch(() => {});
+      if (window.GOJ_SEARCH && window.GOJ_SEARCH.ready) window.GOJ_SEARCH.update(p);
     } catch (e) {
       STATE.saving = false;
       console.error(e);
@@ -587,26 +726,16 @@
     }
   }
 
-  // Flush on tab hide (in case the autosave timer hasn't fired)
-  window.addEventListener("pagehide", () => {
-    if (STATE.dirty) {
-      // Synchronous best-effort: localStorage backup
-      localStorage.setItem("goj.unsaved", JSON.stringify(getCurrent()));
-    }
-  });
   window.addEventListener("beforeunload", () => {
     if (STATE.dirty) {
-      localStorage.setItem("goj.unsaved", JSON.stringify(getCurrent()));
+      const p = getCurrent();
+      if (p && window.GOJ_IDB) window.GOJ_IDB.savePage(p).catch(() => {});
     }
   });
 
-  // -------------------- UI WIRING --------------------
+  // -------------------- UI HELPERS --------------------
   function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
   function setStatus(text, mode) {
@@ -639,23 +768,17 @@
     D.welcome.hidden = false;
   }
 
-  // Theme
   function applyTheme(theme) {
     document.body.setAttribute("data-theme", theme);
     localStorage.setItem("goj.theme", theme);
   }
   applyTheme(localStorage.getItem("goj.theme") || "light");
 
-  // Event wiring on DOM ready
+  // -------------------- WIRING --------------------
   document.addEventListener("DOMContentLoaded", () => {
     D.welcomeBtn.addEventListener("click", async () => {
-      try {
-        await interactiveSignIn();
-        await enterApp();
-      } catch (e) {
-        console.error(e);
-        toast("Sign-in cancelled or blocked");
-      }
+      try { await interactiveSignIn(); await enterApp(); }
+      catch (e) { console.error(e); toast("Sign-in cancelled or blocked"); }
     });
 
     D.signoutBtn.addEventListener("click", signOut);
@@ -663,13 +786,9 @@
     D.newPageBtn.addEventListener("click", () => {
       if (STATE.dirty) savePage();
       const today = toISODate(new Date());
-      // If we already have a page for today and it's empty, just switch to it
       const todays = STATE.pages.filter((p) => p.date === today);
-      const emptyToday = todays.find((p) => !p.title && !plainText(p.content));
-      if (emptyToday) {
-        switchTo(emptyToday.id);
-        return;
-      }
+      const emptyToday = todays.find((p) => !p.title && !plainText(p.content) && !p.drawings.length && !p.photos.length);
+      if (emptyToday) { navigateTo(emptyToday.id); return; }
       const p = newPage(today);
       STATE.pages.push(p);
       STATE.currentId = p.id;
@@ -678,8 +797,8 @@
     });
 
     D.sidebarToggle.addEventListener("click", () => {
-      D.workspace.classList.toggle("show-sidebar");
-      D.workspace.classList.toggle("no-sidebar");
+      D.workspaceGrid.classList.toggle("show-sidebar");
+      D.workspaceGrid.classList.toggle("no-sidebar");
     });
 
     D.themeToggle.addEventListener("click", () => {
@@ -693,28 +812,24 @@
     });
 
     D.titleInput.addEventListener("input", (e) => {
-      const p = getCurrent();
-      if (!p) return;
+      const p = getCurrent(); if (!p) return;
       p.title = e.target.value;
       markDirty();
     });
 
     D.editor.addEventListener("input", () => {
-      const p = getCurrent();
-      if (!p) return;
+      const p = getCurrent(); if (!p) return;
       p.content = D.editor.innerHTML;
       markDirty();
       updateFootMeta();
     });
 
-    // Tag input — comma or Enter commits
     D.tagInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === ",") {
         e.preventDefault();
         const val = D.tagInput.value.trim().replace(/,$/, "");
         if (!val) return;
-        const p = getCurrent();
-        if (!p) return;
+        const p = getCurrent(); if (!p) return;
         p.tags = p.tags || [];
         if (!p.tags.includes(val)) p.tags.push(val);
         D.tagInput.value = "";
@@ -722,45 +837,67 @@
         markDirty();
       } else if (e.key === "Backspace" && !D.tagInput.value) {
         const p = getCurrent();
-        if (p && p.tags && p.tags.length) {
-          p.tags.pop();
-          renderTags();
-          markDirty();
-        }
+        if (p && p.tags && p.tags.length) { p.tags.pop(); renderTags(); markDirty(); }
       }
     });
 
-    // Keyboard shortcuts
+    D.drawBtn.addEventListener("click", async () => {
+      if (!window.GOJ_DRAW) { toast("Drawing module not loaded"); return; }
+      const drawing = await window.GOJ_DRAW.openCanvas();
+      if (drawing) {
+        const p = getCurrent(); if (!p) return;
+        p.drawings = p.drawings || [];
+        p.drawings.push(drawing);
+        markDirty();
+        renderDrawings();
+      }
+    });
+
+    D.photoBtn.addEventListener("click", () => D.photoInput.click());
+    D.photoInput.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      D.photoInput.value = "";
+      if (!file) return;
+      if (!window.GOJ_PHOTO) { toast("Photo module not loaded"); return; }
+      try {
+        const photo = await window.GOJ_PHOTO.process(file);
+        const p = getCurrent(); if (!p) return;
+        p.photos = p.photos || [];
+        p.photos.push(photo);
+        markDirty();
+        renderPhotos();
+      } catch (err) {
+        console.error(err);
+        toast("Couldn't process that photo");
+      }
+    });
+
     document.addEventListener("keydown", (e) => {
       const meta = e.metaKey || e.ctrlKey;
-      if (meta && e.key === "s") {
-        e.preventDefault();
-        savePage();
-        toast("Saved");
-      }
-      if (meta && e.key === "n") {
-        e.preventDefault();
-        D.newPageBtn.click();
-      }
+      if (meta && e.key === "s") { e.preventDefault(); savePage(); toast("Saved"); }
+      if (meta && e.key === "n") { e.preventDefault(); D.newPageBtn.click(); }
       if (meta && e.key === "k") {
         e.preventDefault();
-        D.workspace.classList.add("show-sidebar");
+        D.workspaceGrid.classList.add("show-sidebar");
         D.searchInput.focus();
       }
     });
   });
 
-  // PWA service worker
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
       navigator.serviceWorker.register("./service-worker.js").catch(() => {});
     });
   }
 
-  // Expose a tiny debug surface (no secrets)
   window.GOJ = {
-    state: STATE,
-    signOut,
-    refresh: silentRefresh,
+    STATE, CFG,
+    getCurrent, markDirty, savePage, toast, setStatus,
+    driveCall, uploadBlob, downloadBlobUrl, ensureFolder,
+    navigateTo, newPage, cryptoId, escapeHtml,
+    renderPagesList, renderPageStrip, renderEditor, renderAll,
+    searchableTextFor, plainText, toISODate, formatDate, isToday,
+    silentRefresh, signOut,
   };
+
 })();

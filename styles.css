@@ -613,3 +613,422 @@ body[data-theme="dark"] .page {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ============================================================
+   PHASE 2–6 component styles
+   ============================================================ */
+
+/* ---- Page stage (flip perspective) ---- */
+.page-stage {
+  width: 100%;
+  max-width: var(--page-max);
+  perspective: 2000px;
+  position: relative;
+  transform: scale(var(--page-scale, 1));
+  transform-origin: center top;
+  transition: transform 0.18s var(--ease);
+}
+.page-snapshot {
+  background: var(--paper);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+/* ---- Floating page tools (draw / photo) ---- */
+.page-tools {
+  position: sticky;
+  top: 76px;
+  align-self: flex-end;
+  margin-right: max(0px, calc(50% - var(--page-max) / 2 - 64px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 6;
+  margin-bottom: -56px;
+}
+@media (max-width: 860px) {
+  .page-tools {
+    position: fixed;
+    right: 16px;
+    bottom: 96px;
+    top: auto;
+    margin: 0;
+    flex-direction: column;
+  }
+}
+.page-tool {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink-light);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 8px 24px -12px rgba(0,0,0,0.4);
+  transition: color 0.15s var(--ease), transform 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.page-tool:hover { color: var(--vermillion); border-color: var(--vermillion); transform: translateY(-2px); }
+.page-tool svg { width: 20px; height: 20px; }
+
+/* ---- Drawing cards in the page ---- */
+.drawings-area, .photos-area { margin-top: 8px; }
+.drawing-card {
+  margin: 18px 0;
+  padding: 0;
+}
+.drawing-svg-wrap {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--rad-md);
+  overflow: hidden;
+}
+.drawing-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 60vh;
+}
+.block-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 6px;
+}
+.textbtn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.textbtn:hover { color: var(--vermillion); }
+
+/* ---- Photo cards ---- */
+.photo-card {
+  margin: 18px 0;
+}
+.photo-thumb {
+  position: relative;
+  border: 1px solid var(--rule);
+  border-radius: var(--rad-md);
+  overflow: hidden;
+  background: var(--paper-deep);
+}
+.photo-thumb img { display: block; width: 100%; height: auto; }
+.photo-placeholder {
+  padding: 40px;
+  text-align: center;
+  font-family: var(--font-mono);
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.photo-view {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  background: var(--binding);
+  color: var(--paper);
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.photo-view:hover { color: var(--paper); background: var(--vermillion); }
+.photo-ocr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-light);
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--paper-edge);
+  border-radius: var(--rad-sm);
+  white-space: pre-wrap;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+/* ---- Page row meta (sidebar counts) ---- */
+.page-row-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--vermillion);
+  margin-top: 4px;
+  letter-spacing: 0.04em;
+}
+
+/* ---- Two-line page strip ticks ---- */
+.pagestrip-tick { display: flex; flex-direction: column; align-items: center; gap: 1px; line-height: 1.2; }
+.tick-date { font-size: 11px; }
+.tick-title {
+  font-size: 9px;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.6;
+}
+
+/* ============================================================
+   Drawing overlay (Phase 3)
+   ============================================================ */
+.draw-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: var(--paper-edge);
+  display: flex;
+  flex-direction: column;
+}
+.draw-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--rule);
+}
+.draw-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-variation-settings: "opsz" 144, "SOFT" 70;
+}
+.draw-actions { display: flex; gap: 10px; }
+.draw-stage {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+#drawCanvas {
+  background: #F4EFE5;
+  border-radius: 2px;
+  box-shadow: 0 20px 60px -40px rgba(0,0,0,0.4);
+  touch-action: none;
+  max-width: 100%;
+  max-height: 100%;
+  cursor: crosshair;
+}
+.draw-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 14px 20px 20px;
+  border-top: 1px solid var(--rule);
+}
+.draw-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+}
+.tool-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ink-light);
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+.tool-btn svg { width: 18px; height: 18px; }
+.tool-btn:hover { background: var(--vermillion-soft); }
+.tool-btn.active { background: var(--ink); color: var(--paper); }
+.size-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: grid; place-items: center;
+  position: relative;
+}
+.size-btn::after {
+  content: "";
+  width: var(--dot, 8px);
+  height: var(--dot, 8px);
+  background: var(--ink);
+  border-radius: 50%;
+}
+.size-btn.active { background: var(--vermillion-soft); }
+.size-btn.active::after { background: var(--vermillion); }
+.color-btn {
+  appearance: none;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.color-btn.active { border-color: var(--ink); box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--ink); }
+
+/* ============================================================
+   Progress overlay (Phase 4 photo pipeline)
+   ============================================================ */
+.progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  background: rgba(20, 17, 15, 0.55);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.progress-card {
+  background: var(--paper);
+  border-radius: var(--rad-lg);
+  padding: 32px 36px;
+  max-width: 360px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 30px 80px -40px rgba(0,0,0,0.6);
+}
+.progress-mark {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.progress-mark .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--vermillion);
+  animation: pulse 1.2s var(--ease) infinite;
+}
+.progress-mark .dot:nth-child(2) { animation-delay: 0.15s; }
+.progress-mark .dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+.progress-step {
+  font-family: var(--font-body);
+  font-size: 16px;
+  margin: 0 0 16px;
+  color: var(--ink);
+}
+.progress-bar {
+  height: 4px;
+  background: var(--paper-deep);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--vermillion);
+  border-radius: 999px;
+  transition: width 0.3s var(--ease);
+}
+.progress-hint {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--ink-faint);
+  margin: 0;
+}
+
+/* ============================================================
+   Lightbox (Phase 4 photo viewer)
+   ============================================================ */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 205;
+  background: rgba(20, 17, 15, 0.82);
+  backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+}
+.lightbox-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+}
+.lightbox-tabs { display: flex; gap: 4px; }
+.lightbox-tab {
+  appearance: none;
+  border: none;
+  background: rgba(244, 239, 229, 0.12);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 7px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.lightbox-tab.active { background: var(--paper); color: var(--ink); }
+.lightbox-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 0;
+  overflow: hidden;
+}
+@media (max-width: 768px) {
+  .lightbox-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0,1fr) auto; }
+}
+.lightbox-image-wrap {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: auto;
+}
+.lightbox-image-wrap img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 2px;
+  box-shadow: 0 20px 60px -30px rgba(0,0,0,0.7);
+}
+.lightbox-loading {
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  opacity: 0.7;
+}
+.lightbox-text {
+  background: var(--paper);
+  padding: 22px;
+  overflow-y: auto;
+}
+.lightbox-text-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 12px;
+}
+.lightbox-text-content {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+/* View Transitions (Phase 6) — soft cross-fade for the page swap */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.35s;
+}
