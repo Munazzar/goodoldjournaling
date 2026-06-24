@@ -17,28 +17,30 @@
 (() => {
   "use strict";
 
-  const PERFECT_FREEHAND_URL = "https://cdn.jsdelivr.net/npm/perfect-freehand@1.2.2/dist/index.umd.js";
+  // perfect-freehand has no UMD build, so we import the ESM module directly.
+  // If this fails for any reason, drawing still works via a stroked-polyline fallback.
+  const PERFECT_FREEHAND_URL = "https://esm.sh/perfect-freehand@1.2.2";
 
+  let pfGetStroke = null;   // set to the real getStroke when the module loads
   let pfLoaded = false;
+  function hasPF() { return typeof pfGetStroke === "function"; }
+
   async function loadPerfectFreehand() {
     if (pfLoaded) return;
-    if (window.PerfectFreehand && window.PerfectFreehand.getStroke) { pfLoaded = true; return; }
-    await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = PERFECT_FREEHAND_URL;
-      s.async = true;
-      s.onload = () => { pfLoaded = true; resolve(); };
-      s.onerror = () => reject(new Error("Couldn't load perfect-freehand"));
-      document.head.appendChild(s);
-    });
+    pfLoaded = true; // only attempt once
+    try {
+      const mod = await import(PERFECT_FREEHAND_URL);
+      if (mod && typeof mod.getStroke === "function") pfGetStroke = mod.getStroke;
+      else if (mod && mod.default && typeof mod.default.getStroke === "function") pfGetStroke = mod.default.getStroke;
+    } catch (e) {
+      console.warn("perfect-freehand unavailable, using polyline strokes:", e);
+      pfGetStroke = null; // fallback path handles everything
+    }
   }
 
   function getStroke(points, options) {
-    if (window.PerfectFreehand && window.PerfectFreehand.getStroke) {
-      return window.PerfectFreehand.getStroke(points, options);
-    }
-    // Fallback: just return points if perfect-freehand isn't available
-    return points.map(([x, y]) => [x, y]);
+    if (hasPF()) return pfGetStroke(points, options);
+    return points; // fallback: raw centerline (rendered as a stroked polyline)
   }
 
   function getSvgPathFromStroke(stroke) {
@@ -72,11 +74,25 @@
     svg.setAttribute("class", "drawing-svg");
     (drawing.strokes || []).forEach((s) => {
       if (s.eraser) return; // eraser strokes don't render — they removed content live
-      const points = s.points;
-      const outline = getStroke(points, strokeOptions(s.size, false));
+      const color = s.color || "#1B1816";
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", getSvgPathFromStroke(outline));
-      path.setAttribute("fill", s.color || "#1B1816");
+      if (hasPF()) {
+        const outline = pfGetStroke(s.points, strokeOptions(s.size, false));
+        path.setAttribute("d", getSvgPathFromStroke(outline));
+        path.setAttribute("fill", color);
+      } else {
+        // Stroked polyline fallback — always renders as a line
+        const pts = s.points;
+        if (!pts.length) return;
+        let d = `M ${pts[0][0]} ${pts[0][1]}`;
+        for (let i = 1; i < pts.length; i++) d += ` L ${pts[i][0]} ${pts[i][1]}`;
+        path.setAttribute("d", d);
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", color);
+        path.setAttribute("stroke-width", String(s.size || 6));
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+      }
       svg.appendChild(path);
     });
     return svg;
@@ -174,15 +190,43 @@
 
       function drawStrokeOnCanvas(s) {
         if (s.eraser) return;
-        const outline = getStroke(s.points, strokeOptions(s.size, false));
-        ctx.fillStyle = s.color || "#1B1816";
-        ctx.beginPath();
-        outline.forEach(([x, y], i) => {
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
-        ctx.closePath();
-        ctx.fill();
+        const color = s.color || "#1B1816";
+        if (hasPF()) {
+          // perfect-freehand: outline polygon, filled
+          const outline = pfGetStroke(s.points, strokeOptions(s.size, false));
+          if (!outline.length) return;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(outline[0][0], outline[0][1]);
+          for (let i = 1; i < outline.length; i++) ctx.lineTo(outline[i][0], outline[i][1]);
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          // Fallback: a real stroked line (round caps/joins), pressure-scaled width
+          const pts = s.points;
+          if (pts.length < 1) return;
+          ctx.strokeStyle = color;
+          ctx.lineJoin = "round";
+          ctx.lineCap = "round";
+          if (pts.length === 1) {
+            // a dot
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(pts[0][0], pts[0][1], Math.max(1, s.size / 2), 0, Math.PI * 2);
+            ctx.fill();
+            return;
+          }
+          ctx.beginPath();
+          ctx.moveTo(pts[0][0], pts[0][1]);
+          for (let i = 1; i < pts.length; i++) {
+            const pr = pts[i][2] || 0.5;
+            ctx.lineWidth = Math.max(1, s.size * (0.5 + pr));
+            ctx.lineTo(pts[i][0], pts[i][1]);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(pts[i][0], pts[i][1]);
+          }
+        }
       }
 
       function pointerToLocal(e) {

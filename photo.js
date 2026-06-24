@@ -35,21 +35,24 @@
   function loadOpenCV() {
     if (cvLoading) return cvLoading;
     cvLoading = new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+      const hardTimeout = setTimeout(() => done(reject, new Error("OpenCV load timed out")), 25000);
       const ready = () => {
-        // OpenCV.js calls Module.onRuntimeInitialized when fully loaded
-        if (window.cv && cv.Mat) { resolve(); return; }
+        if (window.cv && cv.Mat) { clearTimeout(hardTimeout); done(resolve); return; }
         const interval = setInterval(() => {
-          if (window.cv && cv.Mat) { clearInterval(interval); resolve(); }
+          if (window.cv && cv.Mat) { clearInterval(interval); clearTimeout(hardTimeout); done(resolve); }
         }, 50);
-        setTimeout(() => clearInterval(interval), 60000);
       };
       const script = document.createElement("script");
       script.src = OPENCV_URL;
       script.async = true;
       script.onload = ready;
-      script.onerror = () => reject(new Error("Couldn't load OpenCV.js"));
+      script.onerror = () => { clearTimeout(hardTimeout); done(reject, new Error("Couldn't load OpenCV.js")); };
       document.head.appendChild(script);
     });
+    // If it fails, allow a future retry
+    cvLoading.catch(() => { cvLoading = null; });
     return cvLoading;
   }
 
@@ -61,10 +64,12 @@
       const s = document.createElement("script");
       s.src = TESSERACT_URL;
       s.async = true;
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error("Couldn't load Tesseract.js"));
+      const to = setTimeout(() => reject(new Error("Tesseract load timed out")), 25000);
+      s.onload = () => { clearTimeout(to); resolve(); };
+      s.onerror = () => { clearTimeout(to); reject(new Error("Couldn't load Tesseract.js")); };
       document.head.appendChild(s);
     });
+    tessLoading.catch(() => { tessLoading = null; });
     return tessLoading;
   }
 
@@ -192,84 +197,93 @@
     const progress = openProgress();
     const photoId = (window.GOJ && window.GOJ.cryptoId) ? window.GOJ.cryptoId() : Math.random().toString(36).slice(2);
 
+    // Read + downscale the image. This must succeed for us to add anything.
+    progress.setStep("Reading image…", 5);
+    const { img, url } = await loadImageFromFile(file);
+    const { width, height } = downsize(img.naturalWidth, img.naturalHeight, MAX_PROCESS_DIM);
+    const srcCanvas = document.createElement("canvas");
+    srcCanvas.width = width;
+    srcCanvas.height = height;
+    srcCanvas.getContext("2d").drawImage(img, 0, 0, width, height);
+
+    // Thumbnail from the ORIGINAL — never depends on OpenCV.
+    const thumbnail = makeThumbnail(srcCanvas, 320);
+    const dateStr = (window.GOJ && window.GOJ.toISODate) ? window.GOJ.toISODate(new Date()) : new Date().toISOString().slice(0,10);
+    const base = `photo-${dateStr}-${photoId.slice(0, 6)}`;
+
+    // STEP 1 — upload the original. This is the "at least add the image" guarantee.
+    progress.setStep("Saving image…", 20);
+    let originalFileId = null;
     try {
-      progress.setStep("Reading image…", 5);
-      const { img, url } = await loadImageFromFile(file);
-
-      const { width, height } = downsize(img.naturalWidth, img.naturalHeight, MAX_PROCESS_DIM);
-      const srcCanvas = document.createElement("canvas");
-      srcCanvas.width = width;
-      srcCanvas.height = height;
-      const sctx = srcCanvas.getContext("2d");
-      sctx.drawImage(img, 0, 0, width, height);
-
-      progress.setStep("Loading image tools (first time only)…", 15);
-      await loadOpenCV();
-
-      progress.setStep("Cleaning the page…", 35);
-      let cleanedCanvas;
-      try {
-        cleanedCanvas = cleanWithOpenCV(srcCanvas);
-      } catch (e) {
-        console.warn("OpenCV cleaning failed, using original", e);
-        cleanedCanvas = srcCanvas;
-      }
-
-      progress.setStep("Loading text recognition (first time only)…", 50);
-      await loadTesseract();
-
-      progress.setStep("Reading text…", 60);
-      let ocrText = "";
-      try {
-        ocrText = await runOCR(cleanedCanvas, (pct) => {
-          progress.setStep("Reading text…", 60 + Math.round(pct * 0.25));
-        });
-      } catch (e) {
-        console.warn("OCR failed", e);
-      }
-
-      progress.setStep("Saving…", 88);
-      const thumbnail = makeThumbnail(cleanedCanvas, 320);
       const originalBlob = await canvasToBlob(srcCanvas, "image/jpeg", 0.85);
-      const cleanedBlob  = await canvasToBlob(cleanedCanvas, "image/png");
-
-      const dateStr = (window.GOJ && window.GOJ.toISODate) ? window.GOJ.toISODate(new Date()) : new Date().toISOString().slice(0,10);
-      const base = `photo-${dateStr}-${photoId.slice(0, 6)}`;
-
-      const [originalFileId, cleanedFileId] = await Promise.all([
-        window.GOJ.uploadBlob(originalBlob, `${base}-original.jpg`),
-        window.GOJ.uploadBlob(cleanedBlob,  `${base}-cleaned.png`),
-      ]);
-
-      progress.setStep("Done", 100);
+      originalFileId = await window.GOJ.uploadBlob(originalBlob, `${base}-original.jpg`);
+    } catch (e) {
+      // If even the original upload fails, we can't store it — surface the error.
       URL.revokeObjectURL(url);
-      setTimeout(() => progress.close(), 200);
-
-      return {
-        id: photoId,
-        originalFileId,
-        cleanedFileId,
-        thumbnail,
-        ocrText,
-        width, height,
-        createdAt: new Date().toISOString(),
-      };
-    } catch (err) {
       progress.close();
-      throw err;
+      throw e;
     }
+
+    // STEP 2 — best-effort cleaning (OpenCV). Failure is fine.
+    let cleanedFileId = null;
+    let cleanedCanvas = null;
+    try {
+      progress.setStep("Cleaning the page (first time loads tools)…", 40);
+      await loadOpenCV();
+      cleanedCanvas = cleanWithOpenCV(srcCanvas);
+      const cleanedBlob = await canvasToBlob(cleanedCanvas, "image/png");
+      cleanedFileId = await window.GOJ.uploadBlob(cleanedBlob, `${base}-cleaned.png`);
+    } catch (e) {
+      console.warn("Cleaning skipped:", e);
+      cleanedFileId = null; // lightbox will just show the original
+    }
+
+    // STEP 3 — best-effort OCR (Tesseract). Failure is fine.
+    let ocrText = "";
+    try {
+      progress.setStep("Reading text (first time loads tools)…", 70);
+      await loadTesseract();
+      ocrText = await runOCR(cleanedCanvas || srcCanvas, (pct) => {
+        progress.setStep("Reading text…", 70 + Math.round(pct * 0.25));
+      });
+    } catch (e) {
+      console.warn("OCR skipped:", e);
+      ocrText = "";
+    }
+
+    progress.setStep("Done", 100);
+    URL.revokeObjectURL(url);
+    setTimeout(() => progress.close(), 200);
+
+    if (window.GOJ && window.GOJ.toast) {
+      if (!cleanedFileId && !ocrText) window.GOJ.toast("Image added (auto-processing unavailable)");
+      else if (!ocrText) window.GOJ.toast("Image added (no text detected)");
+    }
+
+    return {
+      id: photoId,
+      originalFileId,
+      cleanedFileId,   // may be null
+      thumbnail,
+      ocrText,
+      width, height,
+      createdAt: new Date().toISOString(),
+    };
   }
 
   // -------- Lightbox --------
   async function openLightbox(photo) {
+    const hasCleaned = !!photo.cleanedFileId;
+    const defaultMode = hasCleaned ? "cleaned" : "original";
+    const tabs = [];
+    if (hasCleaned) tabs.push(`<button class="lightbox-tab active" data-mode="cleaned">cleaned</button>`);
+    tabs.push(`<button class="lightbox-tab${hasCleaned ? "" : " active"}" data-mode="original">original</button>`);
+
     const overlay = document.createElement("div");
     overlay.className = "lightbox-overlay";
     overlay.innerHTML = `
       <div class="lightbox-topbar">
-        <div class="lightbox-tabs">
-          <button class="lightbox-tab active" data-mode="cleaned">cleaned</button>
-          <button class="lightbox-tab" data-mode="original">original</button>
-        </div>
+        <div class="lightbox-tabs">${tabs.join("")}</div>
         <button class="btn" id="lbClose">Close</button>
       </div>
       <div class="lightbox-body">
@@ -289,7 +303,7 @@
       wrap.innerHTML = `<div class="lightbox-loading">loading…</div>`;
       try {
         let url;
-        if (mode === "cleaned") {
+        if (mode === "cleaned" && photo.cleanedFileId) {
           if (!cleanedUrl) cleanedUrl = await window.GOJ.downloadBlobUrl(photo.cleanedFileId);
           url = cleanedUrl;
         } else {
@@ -320,7 +334,7 @@
     overlay.querySelector("#lbClose").addEventListener("click", close);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
 
-    showMode("cleaned");
+    showMode(defaultMode);
   }
 
   window.GOJ_PHOTO = { process, openLightbox };
