@@ -1,0 +1,12 @@
+{
+  "name": "Good Old Journaling",
+  "short_name": "Journal",
+  "description": "A quiet place to write things down. Saved to your Google Drive.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#F4EFE5",
+  "theme_color": "#F4EFE5",
+  "icons": [
+    { "src": "logo.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
