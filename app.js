@@ -650,31 +650,31 @@
   // -------------------- NAVIGATION (with Phase 2 flip) --------------------
   async function navigateTo(id, opts = {}) {
     if (id === STATE.currentId) return;
-    if (STATE.dirty) await savePage();
+    if (STATE.dirty) savePage();   // fire-and-forget so the flip starts immediately
 
     const current = getCurrent();
     const next = STATE.pages.find((p) => p.id === id);
     if (!next) return;
 
-    // direction may be passed in (scrubber knows the gesture direction);
-    // otherwise infer from dates. "left" / "right" preferred; legacy forward/back accepted.
     let direction = opts.direction;
     if (!direction) direction = current && next.date > current.date ? "right" : "left";
 
-    const doFlip = opts.flip !== false;
-    if (doFlip && window.GOJ_FLIP && !STATE.flipping) {
+    const F = window.GOJ_FLIP;
+    const doFlip = opts.flip !== false && F && F.flipOut;
+    if (doFlip && !STATE.flipping) {
       STATE.flipping = true;
       try {
-        await window.GOJ_FLIP.flip({ direction, durationMs: window.GOJ_FLIP.currentFlipDuration() });
-      } catch (e) { console.warn(e); }
+        await F.flipOut(direction);     // rotate current page to edge-on
+        STATE.currentId = id;
+        renderAll();                    // swap content while edge-on (hidden)
+        await F.flipIn(direction);      // rotate the new page back in
+      } catch (e) {
+        STATE.currentId = id;
+        renderAll();
+      }
       STATE.flipping = false;
-    }
-
-    STATE.currentId = id;
-
-    if (document.startViewTransition) {
-      document.startViewTransition(() => renderAll());
     } else {
+      STATE.currentId = id;
       renderAll();
     }
   }
