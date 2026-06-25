@@ -342,8 +342,6 @@ body {
   align-items: center;
   padding: 40px 24px 80px;
   overflow-y: auto;
-  perspective: 2200px;
-  perspective-origin: center 40%;
 }
 
 .page {
@@ -602,16 +600,33 @@ body[data-theme="dark"] .page {
 /* hint removed entirely */
 .scrubber-hint { display: none; }
 
-/* The cheap blank sheet used during rapid scrubbing */
-.flip-sheet {
-  position: absolute;
+/* A turning page leaf (book flip) */
+.flip-leaf {
   background: var(--paper);
   border-radius: 2px;
+  overflow: hidden;
   pointer-events: none;
-  z-index: 5;
+  z-index: 30;
   backface-visibility: hidden;
-  box-shadow: 0 0 30px -10px rgba(0,0,0,0.3);
+  -webkit-backface-visibility: hidden;
+  box-shadow: -2px 0 24px -6px rgba(0,0,0,0.28);
   will-change: transform;
+}
+/* spine-side gradient so the turn reads as a page lifting off the binding */
+.flip-leaf::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 60px;
+  pointer-events: none;
+}
+.flip-leaf.spine-left::after {
+  left: 0;
+  background: linear-gradient(to right, rgba(0,0,0,0.10), transparent);
+}
+.flip-leaf.spine-right::after {
+  right: 0;
+  background: linear-gradient(to left, rgba(0,0,0,0.10), transparent);
 }
 
 /* ===== TOAST ===== */
@@ -693,11 +708,11 @@ body[data-theme="dark"] .page {
 .page-stage {
   width: 100%;
   max-width: var(--page-max);
-  perspective: 2000px;
+  margin: 0 auto;
+  perspective: 2400px;
+  perspective-origin: center center;
   position: relative;
-  transform: scale(var(--page-scale, 1));
-  transform-origin: center top;
-  transition: transform 0.18s var(--ease);
+  transform-style: preserve-3d;
 }
 .page-snapshot {
   background: var(--paper);
@@ -1128,5 +1143,4 @@ body:has(.scrubber[data-state="active"]) .page-tools {
 }
 
 /* Make the page stage never cause horizontal scroll when zoomed */
-.page-stage { max-width: 100%; }
 body { overflow-x: hidden; }

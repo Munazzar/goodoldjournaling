@@ -1,36 +1,32 @@
 /* ============================================================
-   flip.js — navigation: floating title scrubber + page flips
+   flip.js — floating title scrubber + real book-page turns
    ============================================================
-   The scrubber has no box. At rest it shows ONLY the current
-   title. Press/hold-drag (or focus + wheel) reveals the
-   neighbouring titles and scrolls with momentum. While you
-   scroll, the page LEANS in the scroll direction; when you land
-   on a title, the page does a single smooth two-phase flip
-   (rotate out → swap content edge-on → rotate in).
+   At rest the scrubber shows ONLY the current title, pinned to the
+   bottom of the screen. Drag it (or focus + wheel) to scrub titles
+   with momentum. Every title you cross turns a real page: a leaf
+   anchored at the spine rotates away to reveal the next page.
 
-       scroll up   → flip LEFT
-       scroll down → flip RIGHT
+       scroll up   → pages turn LEFT  (forward)
+       scroll down → pages turn RIGHT (back)
 
    Exposes:
      GOJ_FLIP.render(orderedPages, currentId)
-     GOJ_FLIP.flipOut(direction)   → Promise (rotate page to edge-on)
-     GOJ_FLIP.flipIn(direction)    → Promise (rotate new page back in)
+     GOJ_FLIP.leafTurn(direction, swapFn) → Promise  (one page turn)
      GOJ_FLIP.currentFlipDuration()
    ============================================================ */
 
 (() => {
   "use strict";
 
-  const ROW_H = 40;             // px per title row
+  const ROW_H = 40;
   const MOMENTUM_DECAY = 0.93;
   const MOMENTUM_MIN = 0.02;
   const VEL_ALPHA = 0.4;
-  const LEAN_K = 7;            // velocity → lean degrees
-  const LEAN_MAX = 16;
-  const FLIP_OUT_MS = 130;
-  const FLIP_IN_MS = 170;
+  const SLOW_VEL = 1.1;          // below this → rich (cloned) leaf; above → blank leaf
+  const TURN_SLOW_MS = 360;
+  const TURN_FAST_MS = 150;
 
-  let scrubber, viewport, listEl, hintEl, stageEl, pageEl;
+  let scrubber, viewport, listEl, stageEl, pageEl;
   let pages = [];
   let currentId = null;
 
@@ -40,14 +36,15 @@
   let lastY = 0, lastT = 0;
   let velocity = 0;
   let momentumRaf = null;
-  let lastDir = "right";
-  let leanIdleRaf = null;
+  let lastDir = "left";
+
+  let activeLeaf = null;
+  let activeAnim = null;
 
   function init() {
     scrubber = document.getElementById("scrubber");
     viewport = document.getElementById("scrubberViewport");
     listEl   = document.getElementById("scrubberList");
-    hintEl   = document.getElementById("scrubberHint");
     stageEl  = document.getElementById("pageStage");
     pageEl   = document.getElementById("pageEl");
     if (!scrubber) return;
@@ -58,13 +55,12 @@
     window.addEventListener("pointercancel", onUp);
     scrubber.addEventListener("wheel", onWheel, { passive: false });
 
-    // Focus reveals neighbours (keyboard / tap-focus)
     scrubber.setAttribute("tabindex", "0");
-    scrubber.addEventListener("focus", () => expand());
+    scrubber.addEventListener("focus", expand);
     scrubber.addEventListener("blur", () => { if (!dragging) collapse(); });
   }
 
-  // -------- Rendering --------
+  // -------- Render the title list --------
   function render(orderedPages, curId) {
     pages = orderedPages || [];
     currentId = curId;
@@ -106,21 +102,7 @@
   }
 
   function expand() { scrubber.dataset.state = "active"; }
-  function collapse() { scrubber.dataset.state = "collapsed"; setLean(0, true); }
-
-  // -------- Lean (continuous feedback while scrolling) --------
-  function setLean(deg, ease) {
-    if (!stageEl) return;
-    stageEl.style.transition = ease ? "transform 0.32s cubic-bezier(.22,.61,.36,1)" : "transform 0s";
-    stageEl.style.transform = `rotateY(${deg}deg)`;
-  }
-
-  function leanFromVelocity() {
-    let deg = velocity * LEAN_K;
-    if (deg > LEAN_MAX) deg = LEAN_MAX;
-    if (deg < -LEAN_MAX) deg = -LEAN_MAX;
-    setLean(deg, false);
-  }
+  function collapse() { scrubber.dataset.state = "collapsed"; }
 
   // -------- Interaction --------
   function onDown(e) {
@@ -145,15 +127,7 @@
     scrollPx -= dy;
     clampScroll();
     applyTransform(false);
-
-    const ni = Math.round(scrollPx / ROW_H);
-    if (ni !== activeIndex) {
-      lastDir = ni > activeIndex ? "left" : "right";
-      activeIndex = ni;
-      setActiveRow();
-      haptic();
-    }
-    leanFromVelocity();
+    handleIndexChange();
     lastY = e.clientY;
     lastT = now;
   }
@@ -169,20 +143,13 @@
     e.preventDefault();
     stopMomentum();
     expand();
+    velocity = -e.deltaY / 16;
     scrollPx += e.deltaY;
     clampScroll();
     applyTransform(false);
-    const ni = Math.round(scrollPx / ROW_H);
-    if (ni !== activeIndex) {
-      lastDir = ni > activeIndex ? "left" : "right";
-      activeIndex = ni;
-      setActiveRow();
-    }
-    // small lean based on wheel delta
-    velocity = Math.max(-3, Math.min(3, -e.deltaY / 16));
-    leanFromVelocity();
+    handleIndexChange();
     clearTimeout(onWheel._t);
-    onWheel._t = setTimeout(settle, 200);
+    onWheel._t = setTimeout(settle, 220);
   }
 
   function clampScroll() {
@@ -191,23 +158,28 @@
     if (scrollPx > max) scrollPx = max;
   }
 
+  function handleIndexChange() {
+    const ni = Math.round(scrollPx / ROW_H);
+    if (ni === activeIndex) return;
+    const dir = ni > activeIndex ? "left" : "right";   // forward=left, back=right
+    lastDir = dir;
+    activeIndex = ni;                                   // jump (don't turn every intermediate)
+    const target = pages[activeIndex];
+    if (target) turnTo(target.id, dir);
+    setActiveRow();
+    haptic();
+  }
+
   function startMomentum() {
-    let v = -velocity; // list moves opposite the finger
+    let v = -velocity;
     const step = () => {
       v *= MOMENTUM_DECAY;
       if (Math.abs(v) < MOMENTUM_MIN) { momentumRaf = null; settle(); return; }
+      velocity = v;
       scrollPx += v * 16;
       clampScroll();
       applyTransform(false);
-      const ni = Math.round(scrollPx / ROW_H);
-      if (ni !== activeIndex) {
-        lastDir = ni > activeIndex ? "left" : "right";
-        activeIndex = ni;
-        setActiveRow();
-      }
-      // lean follows momentum velocity (px/frame → px/ms)
-      velocity = v;
-      leanFromVelocity();
+      handleIndexChange();
       const max = (pages.length - 1) * ROW_H;
       if (scrollPx <= 0 || scrollPx >= max) { momentumRaf = null; settle(); return; }
       momentumRaf = requestAnimationFrame(step);
@@ -224,15 +196,13 @@
     scrollPx = activeIndex * ROW_H;
     applyTransform(true);
     setActiveRow();
+    finishLeaf();
     const target = pages[activeIndex];
     if (target && target.id !== currentId) {
       currentId = target.id;
-      if (window.GOJ && window.GOJ.navigateTo) {
-        window.GOJ.navigateTo(target.id, { direction: lastDir });
-      }
-    } else {
-      setLean(0, true); // ease the lean back if we didn't move
+      if (window.GOJ && window.GOJ.showPageInstant) window.GOJ.showPageInstant(target.id);
     }
+    if (window.GOJ && window.GOJ.syncAfterScrub) window.GOJ.syncAfterScrub();
     clearTimeout(settle._t);
     settle._t = setTimeout(() => { if (!dragging) collapse(); }, 900);
   }
@@ -245,46 +215,100 @@
     const target = pages[i];
     if (target && target.id !== currentId) {
       currentId = target.id;
-      if (window.GOJ && window.GOJ.navigateTo) {
-        window.GOJ.navigateTo(target.id, { direction: dir });
-      }
+      if (window.GOJ && window.GOJ.navigateTo) window.GOJ.navigateTo(target.id, { direction: dir });
     }
   }
 
   function haptic() { if (navigator.vibrate) { try { navigator.vibrate(3); } catch {} } }
 
-  function currentFlipDuration() { return FLIP_OUT_MS + FLIP_IN_MS; }
+  function currentFlipDuration() { return TURN_SLOW_MS; }
 
-  // -------- Two-phase flip (smooth, no DOM cloning) --------
-  function flipOut(direction = "right") {
-    const el = pageEl || document.getElementById("pageEl");
-    if (!el) return Promise.resolve();
-    el.style.transformOrigin = "center center";
-    const to = direction === "left" ? -90 : 90;
-    const anim = el.animate(
-      [{ transform: "rotateY(0deg)" }, { transform: `rotateY(${to}deg)` }],
-      { duration: FLIP_OUT_MS, easing: "cubic-bezier(.4,0,1,.5)", fill: "forwards" }
-    );
-    return anim.finished.catch(() => {});
+  // -------- The page turn (a real leaf) --------
+  function finishLeaf() {
+    if (activeAnim) { try { activeAnim.finish(); } catch {} }
+    if (activeLeaf && activeLeaf.parentNode) activeLeaf.remove();
+    activeLeaf = null; activeAnim = null;
   }
 
-  function flipIn(direction = "right") {
+  function makeLeaf(rich, dir) {
     const el = pageEl || document.getElementById("pageEl");
-    if (!el) { setLean(0, true); return Promise.resolve(); }
-    const from = direction === "left" ? 90 : -90;
-    // reset lean instantly so the in-flip starts clean
-    if (stageEl) { stageEl.style.transition = "transform 0s"; stageEl.style.transform = "rotateY(0deg)"; }
-    const anim = el.animate(
-      [{ transform: `rotateY(${from}deg)` }, { transform: "rotateY(0deg)" }],
-      { duration: FLIP_IN_MS, easing: "cubic-bezier(0,.5,.4,1)", fill: "forwards" }
+    const stage = stageEl || document.getElementById("pageStage");
+    if (!el || !stage) return null;
+    const rect = el.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+
+    let leaf;
+    if (rich) {
+      leaf = el.cloneNode(true);
+      leaf.removeAttribute("id");
+      leaf.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
+      leaf.querySelectorAll("input,[contenteditable]").forEach((n) => {
+        n.setAttribute("readonly", "");
+        n.removeAttribute("contenteditable");
+      });
+    } else {
+      leaf = document.createElement("div");
+      leaf.className = "page";
+    }
+    leaf.classList.add("flip-leaf");
+    leaf.classList.add(dir === "left" ? "spine-left" : "spine-right");
+    Object.assign(leaf.style, {
+      position: "absolute",
+      left: (rect.left - stageRect.left) + "px",
+      top: (rect.top - stageRect.top) + "px",
+      width: rect.width + "px",
+      height: rect.height + "px",
+      margin: "0",
+      zIndex: "30",
+      pointerEvents: "none",
+      backfaceVisibility: "hidden",
+      transformOrigin: dir === "left" ? "left center" : "right center",
+    });
+    stage.appendChild(leaf);
+    return leaf;
+  }
+
+  // Turn to a page during scrubbing (internal): clone current, swap content, flip leaf away.
+  function turnTo(newId, dir) {
+    finishLeaf();
+    const rich = Math.abs(velocity) < SLOW_VEL;
+    const leaf = makeLeaf(rich, dir);
+    // reveal the new page underneath immediately
+    if (window.GOJ && window.GOJ.showPageInstant) window.GOJ.showPageInstant(newId);
+    currentId = newId;
+    if (!leaf) return;
+    const dur = rich ? TURN_SLOW_MS : Math.max(TURN_FAST_MS, TURN_SLOW_MS - Math.abs(velocity) * 90);
+    const to = dir === "left" ? -180 : 180;
+    activeLeaf = leaf;
+    activeAnim = leaf.animate(
+      [{ transform: "rotateY(0deg)" }, { transform: `rotateY(${to}deg)` }],
+      { duration: dur, easing: "cubic-bezier(.4,.06,.34,1)", fill: "forwards" }
     );
-    return anim.finished.then(() => {
-      el.style.transform = "";   // hand control back to layout
-    }).catch(() => { el.style.transform = ""; });
+    activeAnim.onfinish = () => { if (leaf.parentNode) leaf.remove(); if (activeLeaf === leaf) { activeLeaf = null; activeAnim = null; } };
+    activeAnim.oncancel = activeAnim.onfinish;
+  }
+
+  // Public: one deliberate page turn with a content swap in the middle (used for taps/keys)
+  function leafTurn(dir = "left", swapFn) {
+    return new Promise((resolve) => {
+      finishLeaf();
+      const leaf = makeLeaf(true, dir);
+      if (typeof swapFn === "function") swapFn();   // underlying page becomes the new one
+      if (!leaf) { resolve(); return; }
+      const to = dir === "left" ? -180 : 180;
+      activeLeaf = leaf;
+      activeAnim = leaf.animate(
+        [{ transform: "rotateY(0deg)" }, { transform: `rotateY(${to}deg)` }],
+        { duration: TURN_SLOW_MS, easing: "cubic-bezier(.4,.06,.34,1)", fill: "forwards" }
+      );
+      const done = () => { if (leaf.parentNode) leaf.remove(); if (activeLeaf === leaf) { activeLeaf = null; activeAnim = null; } resolve(); };
+      activeAnim.onfinish = done;
+      activeAnim.oncancel = done;
+    });
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 
-  window.GOJ_FLIP = { render, flipOut, flipIn, currentFlipDuration };
+  window.GOJ_FLIP = { render, leafTurn, currentFlipDuration };
 })();

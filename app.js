@@ -650,7 +650,7 @@
   // -------------------- NAVIGATION (with Phase 2 flip) --------------------
   async function navigateTo(id, opts = {}) {
     if (id === STATE.currentId) return;
-    if (STATE.dirty) savePage();   // fire-and-forget so the flip starts immediately
+    if (STATE.dirty) savePage();   // background save; don't block the turn
 
     const current = getCurrent();
     const next = STATE.pages.find((p) => p.id === id);
@@ -660,23 +660,33 @@
     if (!direction) direction = current && next.date > current.date ? "right" : "left";
 
     const F = window.GOJ_FLIP;
-    const doFlip = opts.flip !== false && F && F.flipOut;
-    if (doFlip && !STATE.flipping) {
+    if (opts.flip !== false && F && F.leafTurn && !STATE.flipping) {
       STATE.flipping = true;
       try {
-        await F.flipOut(direction);     // rotate current page to edge-on
-        STATE.currentId = id;
-        renderAll();                    // swap content while edge-on (hidden)
-        await F.flipIn(direction);      // rotate the new page back in
+        await F.leafTurn(direction, () => { STATE.currentId = id; renderAll(); });
       } catch (e) {
-        STATE.currentId = id;
-        renderAll();
+        STATE.currentId = id; renderAll();
       }
       STATE.flipping = false;
     } else {
-      STATE.currentId = id;
-      renderAll();
+      STATE.currentId = id; renderAll();
     }
+  }
+
+  // Swap the visible page content instantly (no full rebuild of the scrubber),
+  // used by the scrubber while it drives its own page-turn leaves.
+  function showPageInstant(id) {
+    STATE.currentId = id;
+    renderEditor();
+    // lightweight active-row highlight in the sidebar
+    [...D.pagesList.querySelectorAll(".page-row")].forEach((r) => {
+      r.classList.toggle("active", false);
+    });
+  }
+
+  // After a scrub finishes, fully resync sidebar + scrubber + search.
+  function syncAfterScrub() {
+    renderAll();
   }
 
   document.addEventListener("keydown", (e) => {
@@ -903,6 +913,7 @@
     getCurrent, markDirty, savePage, toast, setStatus,
     driveCall, uploadBlob, downloadBlobUrl, ensureFolder,
     navigateTo, newPage, cryptoId, escapeHtml,
+    showPageInstant, syncAfterScrub,
     renderPagesList, renderPageStrip, renderEditor, renderAll,
     searchableTextFor, plainText, toISODate, formatDate, isToday,
     silentRefresh, signOut,
